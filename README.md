@@ -10,3 +10,7 @@ Navigation on the device:
 -long hold select or exit from reading mode
 -double click goes up or back a page in reading mode.
 
+To load the device with ebooks you'll need your ebook in the .txt format.
+Go to: settings ->Book Upload
+
+This will trigger an open SSID to be created "EsBook32_Portal" once connected go to 192.168.4.1 where a gui will show where you can Set the Author and Book Title and select the .txt to upload. Once confirmation of successful upload occurs in the browser you can double click to turn off the SSID and your book will now show in the main menu. Each author will have its on "folder" on the main screen. Files are all stored in the same folder on the device itself.
