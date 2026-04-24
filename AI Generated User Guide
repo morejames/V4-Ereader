@@ -1,0 +1,64 @@
+I'll preface that I'm not a great technical writer and didn't feel like writing up a user guide for a personal project I did just to see if I could. Here's what AI served up looking at the code generated to get it working. This will likely work on the Heltec LoRa V3 board with minimal changes.
+
+
+Since you're keeping it lean and technical, here is a professional, scannable **README.md** tailored for your GitHub repo. It balances the "how-to" with the "heads-up" that power users appreciate.
+
+---
+
+# 📖 EsBook32
+A minimalist, distraction-free e-reader built for the **ESP32-S3** and **SSD1306 OLED** displays. No backlight, no notifications, just you and your `.txt` files.
+
+## 🛠 Hardware Setup
+* **MCU:** ESP32-S3 (Optimized for Heltec WiFi LoRa 32 V4)
+* **Display:** 128x64 I2C OLED (SSD1306)
+* **Input:** Single Momentary Button (using the `OneButton` library)
+* **Filesystem:** LittleFS (Internal Flash)
+
+---
+
+## 🕹 Navigation & Controls
+The entire interface is managed through a **single button**. 
+
+| Action | Menu Navigation | Inside a Book |
+| :--- | :--- | :--- |
+| **Single Click** | Move Cursor Down | Next Page |
+| **Double Click** | Move Cursor Up / Exit | Previous Page |
+| **Long Press** | Select / Confirm | Open Pause Menu |
+
+> **Note:** Double-clicking while in the **WiFi Upload** portal will shut down the Access Point and return you to the Settings menu.
+
+---
+
+## 📂 Uploading Books
+The device acts as its own server. To add new reading material:
+
+1.  Navigate to **Settings** -> **WiFi Upload**.
+2.  Connect your phone or computer to the WiFi network: **`EsBook32_Setup`**.
+3.  Open a web browser and go to: **`http://192.168.4.1`**
+4.  Select your `.txt` file and hit **Upload**.
+5.  Once the screen says "SUCCESS," double-click the device button to return to your library.
+
+---
+
+## ⚠️ Caveats & Limitations
+* **File Format:** Strictly supports **`.txt`** files. Formatting (bold, italics, etc.) is not supported.
+* **Encoding:** Ensure your files are saved in **UTF-8** encoding. Files with a "BOM" (Byte Order Mark) might display a few "junk" characters on the first line.
+* **Flat Filesystem:** This version uses a flat root structure. Folders are not supported; all files should be uploaded directly to the root.
+* **File Size:** While the ESP32 can handle large files, extremely massive texts (multi-megabyte) may cause the initial page indexing to feel sluggish.
+* **Deep Sleep:** The device will enter deep sleep after **2 minutes** of inactivity to save battery. Press the hardware **RST** or **PRG** button (depending on your board) to wake it up.
+
+---
+
+## 💾 Progress Saving
+EsBook32 automatically creates a `.pos` file for every book you read. This file stores your current byte offset so you never lose your place, even after a full power-down or deep sleep.
+
+---
+
+## 🚀 Installation
+1.  Open the project in **PlatformIO**.
+2.  Ensure you have the following libraries installed:
+    * `Adafruit GFX`
+    * `Adafruit SSD1306`
+    * `OneButton`
+3.  Set your partition scheme to **Huge APP** or **Minimal SPIFFS (Large LittleFS)** in `platformio.ini` to maximize storage for books.
+4.  Build and Flash.
