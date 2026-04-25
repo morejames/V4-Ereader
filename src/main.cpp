@@ -91,11 +91,10 @@ void updateWiFiDisplay();
 void stopWiFiPortal();
 void drawAnimatedSplash();
 void deleteBookAndCleanup(String fullPath);
+uint8_t getLatin1(uint8_t c);
 
 void setup() {
   Serial.begin(115200);
-  randomSeed(analogRead(0));
-
   pinMode(36, OUTPUT); digitalWrite(36, LOW);
   pinMode(37, OUTPUT); digitalWrite(37, HIGH);
   delay(100);
@@ -106,13 +105,12 @@ void setup() {
   Wire.begin(OLED_SDA, OLED_SCL);
   Wire.setClock(200000);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-
   display.setTextColor(WHITE);
   display.setTextWrap(false);
+  display.cp437(true); 
 
   LittleFS.begin(true);
   prefs.begin("esbook", false);
-
   currentBrightness = prefs.getInt("bright", 4);
   isDarkMode = prefs.getBool("dark", true);
   currentBook = prefs.getString("lastBook", "");
@@ -139,7 +137,7 @@ void setup() {
     else if (currentState == WIFI_PORTAL) { stopWiFiPortal(); currentState = MENU_SETTINGS; buildSettingsMenu(); }
     else if (currentState == MENU_PAUSE) { currentState = READING; pageStartTime = millis(); renderPage(); }
     else if (currentState == MENU_DELETE_CONFIRM) { currentState = MENU_DELETE_SELECT; buildDeleteMenu(); }
-    else if (currentState != MENU_MAIN) {
+    else {
       menuCursorIndex--;
       if (menuCursorIndex < 0) menuCursorIndex = numMenuItems - 1;
       scrollX = 0; scrollComplete = false; scrollDelayStart = millis();
@@ -152,32 +150,25 @@ void setup() {
     if (currentState == READING) {
       unsigned long duration = (millis() - pageStartTime) / 1000;
       if (duration > 5) avgSecondsPerPage = (avgSecondsPerPage * 0.7) + (duration * 0.3);
-      uint32_t totalPagesEst = currentBookSize / 800;
-      int pagesRemaining = totalPagesEst - currentPage;
-      if (pagesRemaining < 0) pagesRemaining = 0;
-      timeLeftMinutes = (pagesRemaining * avgSecondsPerPage) / 60;
+      timeLeftMinutes = ((currentBookSize / 800 - currentPage) * avgSecondsPerPage) / 60;
+      if (timeLeftMinutes < 0) timeLeftMinutes = 0;
       currentState = MENU_PAUSE; buildPauseMenu();
     }
     else if (currentState == MENU_DELETE_CONFIRM) { deleteBookAndCleanup(bookToDelete); currentState = MENU_SETTINGS; buildSettingsMenu(); }
     else if (currentState != WIFI_PORTAL) executeMenuSelection();
   });
 
-    if (currentBook != "" && currentBook != "none" && LittleFS.exists(currentBook)) { loadProgress(); currentState = READING; pageStartTime = millis(); renderPage(); }
-    else { buildMainMenu(); }
+  if (currentBook != "" && currentBook != "none" && LittleFS.exists(currentBook)) { loadProgress(); currentState = READING; pageStartTime = millis(); renderPage(); }
+  else { buildMainMenu(); }
 }
 
 void loop() {
   btn1.tick();
-
   if (currentState != READING && currentState != WIFI_PORTAL && numMenuItems > 0 && !scrollComplete) {
     String currentText = menuItems[menuCursorIndex];
     int limit = (currentState == MENU_MAIN) ? 95 : 110;
-    String textToCheck = currentText;
-    int prefixWidth = 0;
-    if (currentText.startsWith("[+] ")) { textToCheck = currentText.substring(4); prefixWidth = 24; }
-    int textPixelWidth = textToCheck.length() * 6;
-
-    if (textPixelWidth > (limit - prefixWidth)) {
+    int textPixelWidth = currentText.length() * 6;
+    if (textPixelWidth > limit) {
       if (millis() - scrollDelayStart > 1500) {
         if (millis() - lastScrollTime > 50) {
           scrollX++;
@@ -188,13 +179,11 @@ void loop() {
       }
     }
   }
-
   if (currentState == WIFI_PORTAL) {
     server.handleClient();
     if (millis() - lastFooterTime > 40) {
       footerScrollX++;
-      int tickerWidth = 28 * 6;
-      if (footerScrollX >= (tickerWidth + MARQUEE_GAP)) footerScrollX = 0;
+      if (footerScrollX >= (28 * 6 + MARQUEE_GAP)) footerScrollX = 0;
       lastFooterTime = millis();
       updateWiFiDisplay();
     }
@@ -205,56 +194,61 @@ void loop() {
 
 void resetActivityTimer() { lastActivityTime = millis(); }
 
+uint8_t getLatin1(uint8_t c) {
+  static uint8_t state = 0;
+  if (state == 0) {
+    if (c < 0x80) return c; 
+    state = c; return 0;    
+  }
+  else if (state == 0xC2) { state = 0; return c; }
+  else if (state == 0xC3) { state = 0; return c | 0x40; }
+  else if (state == 0xE2) {
+    if (c == 0x80) { state = 0x01; return 0; } 
+    state = 0; return 0; 
+  }
+  else if (state == 0x01) {
+    state = 0; 
+    if (c == 0x98 || c == 0x99 || c == 0x9B) return '\''; 
+    if (c == 0x9C || c == 0x9D || c == 0x9F) return '"';  
+    if (c == 0x93 || c == 0x94) return '-';               
+    if (c == 0xA6) return '.';                            
+    return '\''; 
+  }
+  state = 0; return 0;
+}
+
 void deleteBookAndCleanup(String fullPath) {
   if (!fullPath.endsWith(".txt")) fullPath += ".txt";
   if (!fullPath.startsWith("/")) fullPath = "/" + fullPath;
   LittleFS.remove(fullPath);
-  String posPath = fullPath; posPath.replace(".txt", ".pos");
-  if (LittleFS.exists(posPath)) LittleFS.remove(posPath);
+  String p = fullPath; p.replace(".txt", ".pos");
+  if (LittleFS.exists(p)) LittleFS.remove(p);
 }
-
-// --- Menus ---
 
 void buildMainMenu() {
   numMenuItems = 0; menuCursorIndex = 0; scrollX = 0; scrollComplete = false; scrollDelayStart = millis();
   File root = LittleFS.open("/");
   File file = root.openNextFile();
-
   if (currentPath == "/") {
     while(file && numMenuItems < MAX_FILES - 2) {
-      if (!file.isDirectory()) {
-        String fn = String(file.name());
-        if (fn.startsWith("/")) fn = fn.substring(1);
-        if (fn.endsWith(".txt")) {
-          int tildeIdx = fn.indexOf('~');
-          if (tildeIdx > 0) {
-            String authorName = fn.substring(0, tildeIdx);
-            String virtualFolder = "[+] " + authorName;
-            bool exists = false;
-            for(int i = 0; i < numMenuItems; i++) {
-              if(menuItems[i] == virtualFolder) { exists = true; break; }
-            }
-            if(!exists) menuItems[numMenuItems++] = virtualFolder;
-          } else {
-            menuItems[numMenuItems++] = fn.substring(0, fn.length() - 4);
-          }
-        }
+      String fn = String(file.name()); if (fn.startsWith("/")) fn = fn.substring(1);
+      if (fn.endsWith(".txt")) {
+        int tidx = fn.indexOf('~');
+        if (tidx > 0) {
+          String vF = "[+] " + fn.substring(0, tidx);
+          bool ex = false; for(int i=0; i<numMenuItems; i++) if(menuItems[i]==vF){ex=true; break;}
+          if(!ex) menuItems[numMenuItems++] = vF;
+        } else menuItems[numMenuItems++] = fn.substring(0, fn.length() - 4);
       }
       file = root.openNextFile();
     }
     menuItems[numMenuItems++] = "-> Settings";
   } else {
     menuItems[numMenuItems++] = "[<-- Back]";
-    String targetAuthor = currentPath.substring(1);
+    String auth = currentPath.substring(1);
     while(file && numMenuItems < MAX_FILES) {
-      if (!file.isDirectory()) {
-        String fn = String(file.name());
-        if (fn.startsWith("/")) fn = fn.substring(1);
-        if (fn.endsWith(".txt") && fn.startsWith(targetAuthor + "~")) {
-          String title = fn.substring(targetAuthor.length() + 1, fn.length() - 4);
-          menuItems[numMenuItems++] = title;
-        }
-      }
+      String fn = String(file.name()); if (fn.startsWith("/")) fn = fn.substring(1);
+      if (fn.endsWith(".txt") && fn.startsWith(auth + "~")) menuItems[numMenuItems++] = fn.substring(auth.length() + 1, fn.length() - 4);
       file = root.openNextFile();
     }
   }
@@ -262,18 +256,15 @@ void buildMainMenu() {
 }
 
 void buildSettingsMenu() {
-  numMenuItems = 0; menuCursorIndex = 0; scrollX = 0; scrollComplete = false;
-  menuItems[numMenuItems++] = "Book Upload";
-  menuItems[numMenuItems++] = "Display Setup";
-  menuItems[numMenuItems++] = "Progress Reset";
-  menuItems[numMenuItems++] = "Delete Book";
-  menuItems[numMenuItems++] = "Power Off";
-  menuItems[numMenuItems++] = "< Back to Books";
+  numMenuItems = 0; menuCursorIndex = 0;
+  menuItems[numMenuItems++] = "Book Upload"; menuItems[numMenuItems++] = "Display Setup";
+  menuItems[numMenuItems++] = "Progress Reset"; menuItems[numMenuItems++] = "Delete Book";
+  menuItems[numMenuItems++] = "Power Off"; menuItems[numMenuItems++] = "< Back to Books";
   drawMenu();
 }
 
 void buildDisplayMenu() {
-  numMenuItems = 0; menuCursorIndex = 0; scrollX = 0; scrollComplete = false;
+  numMenuItems = 0; menuCursorIndex = 0;
   menuItems[numMenuItems++] = "Brightness: " + String(currentBrightness);
   menuItems[numMenuItems++] = isDarkMode ? "Mode: DARK" : "Mode: LIGHT";
   menuItems[numMenuItems++] = "< Back";
@@ -281,26 +272,17 @@ void buildDisplayMenu() {
 }
 
 void buildPauseMenu() {
-  numMenuItems = 0; menuCursorIndex = 0; scrollX = 0; scrollComplete = false;
-  menuItems[numMenuItems++] = "Continue Reading";
-  menuItems[numMenuItems++] = "Save & Exit";
+  numMenuItems = 0; menuCursorIndex = 0;
+  menuItems[numMenuItems++] = "Continue Reading"; menuItems[numMenuItems++] = "Save & Exit";
   drawMenu();
 }
 
 void buildDeleteMenu() {
-  numMenuItems = 0; menuCursorIndex = 0; scrollX = 0; scrollComplete = false;
-  File root = LittleFS.open("/");
-  File entry = root.openNextFile();
+  numMenuItems = 0; menuCursorIndex = 0;
+  File root = LittleFS.open("/"); File entry = root.openNextFile();
   while(entry && numMenuItems < MAX_FILES - 1) {
-    if (!entry.isDirectory()) {
-      String fn = String(entry.name());
-      if (fn.startsWith("/")) fn = fn.substring(1);
-      if(fn.endsWith(".txt")) {
-        String displayName = fn.substring(0, fn.length() - 4);
-        displayName.replace("~", " - ");
-        menuItems[numMenuItems++] = displayName;
-      }
-    }
+    String fn = String(entry.name()); if (fn.startsWith("/")) fn = fn.substring(1);
+    if(fn.endsWith(".txt")) { String d = fn.substring(0, fn.length() - 4); d.replace("~", " - "); menuItems[numMenuItems++] = d; }
     entry = root.openNextFile();
   }
   if (numMenuItems == 0) menuItems[numMenuItems++] = "Library empty";
@@ -309,16 +291,11 @@ void buildDeleteMenu() {
 }
 
 void buildResetMenu() {
-  numMenuItems = 0; menuCursorIndex = 0; scrollX = 0; scrollComplete = false;
+  numMenuItems = 0; menuCursorIndex = 0;
   File root = LittleFS.open("/"); File file = root.openNextFile();
   while(file && numMenuItems < MAX_FILES - 1){
-    String fn = String(file.name());
-    if (fn.startsWith("/")) fn = fn.substring(1);
-    if(fn.endsWith(".pos")) {
-      String displayName = fn.substring(0, fn.length() - 4);
-      displayName.replace("~", " - ");
-      menuItems[numMenuItems++] = displayName;
-    }
+    String fn = String(file.name()); if (fn.startsWith("/")) fn = fn.substring(1);
+    if(fn.endsWith(".pos")) { String d = fn.substring(0, fn.length() - 4); d.replace("~", " - "); menuItems[numMenuItems++] = d; }
     file = root.openNextFile();
   }
   if (numMenuItems == 0) menuItems[numMenuItems++] = "No progress found";
@@ -327,261 +304,149 @@ void buildResetMenu() {
 }
 
 void drawMenu() {
-  display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
+  display.clearDisplay(); display.setTextSize(1);
   if (currentState == MENU_DELETE_CONFIRM) {
-    display.setCursor(M_LEFT, M_TOP + 8); display.println("   !!! DELETE !!!");
-    display.drawLine(M_LEFT, M_TOP + 18, M_RIGHT, M_TOP + 18, WHITE);
-    display.setCursor(M_LEFT, M_TOP + 28); display.println("Permanently remove:");
-    
-    String displayBook = bookToDelete;
-    displayBook.replace("~", " - ");
-    if (displayBook.startsWith("/")) displayBook = displayBook.substring(1);
-    
-    display.setCursor(M_LEFT, M_TOP + 38); display.println(displayBook);
-    display.setCursor(M_LEFT, M_BOTTOM - 8); display.println("Click:NO  Hold:YES");
+    display.setCursor(M_LEFT, M_TOP+8); display.println("   !!! DELETE !!!");
+    display.drawLine(M_LEFT, M_TOP+18, M_RIGHT, M_TOP+18, WHITE);
+    display.setCursor(M_LEFT, M_TOP+28); display.println("Remove permanently:");
+    String d = bookToDelete; d.replace("~", " - "); if (d.startsWith("/")) d = d.substring(1);
+    display.setCursor(M_LEFT, M_TOP+38); display.println(d);
+    display.setCursor(M_LEFT, M_BOTTOM-8); display.println("Click:NO  Hold:YES");
     display.display(); return;
   }
-
-  int startY, drawOffset;
+  int startY = (currentState == MENU_MAIN || currentState == MENU_PAUSE) ? M_TOP+20 : M_TOP+11;
+  int dOff = (currentState == MENU_MAIN || currentState == MENU_PAUSE) ? 3 : 4;
   if (currentState == MENU_MAIN || currentState == MENU_PAUSE) {
-    printStatusBar(currentState == MENU_PAUSE);
-    display.setCursor(M_LEFT, M_TOP + 10);
-    
-    String headerPath = currentPath;
-    headerPath.replace("~", " - ");
-    
-    if (currentState == MENU_MAIN) display.print(currentPath == "/" ? "--- Library ---" : "--- " + headerPath + " ---");
-    else display.println("--- Paused ---");
-    startY = M_TOP + 20; drawOffset = 3;
-    if (currentState == MENU_PAUSE) { display.setCursor(M_LEFT + 10, M_BOTTOM - 8); display.print("Time Left: "); display.print(timeLeftMinutes); display.print("m"); }
+    printStatusBar(currentState == MENU_PAUSE); display.setCursor(M_LEFT, M_TOP+10);
+    String h = currentPath; h.replace("~", " - ");
+    display.print(currentPath == "/" ? "--- Library ---" : "--- " + h + " ---");
+    if (currentState == MENU_PAUSE) { display.setCursor(M_LEFT+10, M_BOTTOM-8); display.print("Time Left: "); display.print(timeLeftMinutes); display.print("m"); }
   } else {
     display.setCursor(M_LEFT, M_TOP);
     if (currentState == MENU_SETTINGS) display.println("[ Settings ]");
     else if (currentState == MENU_DISPLAY) display.println("[ Display ]");
     else if (currentState == MENU_RESET_PROGRESS) display.println("[ Reset ]");
     else if (currentState == MENU_DELETE_SELECT) display.println("[ Delete Book ]");
-    startY = M_TOP + 11; drawOffset = 4;
   }
-
   for (int i = 0; i < numMenuItems; i++) {
-    int drawY = startY + (i * 10) - (menuCursorIndex > drawOffset ? (menuCursorIndex - drawOffset) * 10 : 0);
+    int drawY = startY + (i * 10) - (menuCursorIndex > dOff ? (menuCursorIndex - dOff) * 10 : 0);
     if (drawY >= startY && drawY <= M_BOTTOM - 8) {
-      String itemText = menuItems[i];
-      if (i == menuCursorIndex) { display.setCursor(M_LEFT, drawY); display.print(">"); }
-      if (itemText.startsWith("[+] ")) {
-        display.setCursor(M_LEFT + 8, drawY); display.print("[+] ");
-        String authorName = itemText.substring(4);
-        int textWidth = authorName.length() * 6;
-        if (i == menuCursorIndex && textWidth > (M_RIGHT - (M_LEFT + 32))) {
-          display.setCursor(M_LEFT + 32 - scrollX, drawY); display.print(authorName);
-          display.setCursor(M_LEFT + 32 - scrollX + textWidth + MARQUEE_GAP, drawY); display.print(authorName);
-        } else { display.setCursor(M_LEFT + 32, drawY); display.print(authorName); }
-      } else {
-        int limit = (M_RIGHT - (M_LEFT + 8));
-        int textWidth = itemText.length() * 6;
-        if (i == menuCursorIndex && textWidth > limit) {
-          display.setCursor(M_LEFT + 8 - scrollX, drawY); display.print(itemText);
-          display.setCursor(M_LEFT + 8 - scrollX + textWidth + MARQUEE_GAP, drawY); display.print(itemText);
-        } else { display.setCursor(M_LEFT + 8, drawY); display.print(itemText); }
-      }
+      String it = menuItems[i]; if (i == menuCursorIndex) { display.setCursor(M_LEFT, drawY); display.print(">"); }
+      int tX = M_LEFT + (it.startsWith("[+] ") ? 32 : 8);
+      if (it.startsWith("[+] ")) { display.setCursor(M_LEFT + 8, drawY); display.print("[+] "); it = it.substring(4); }
+      int lim = (M_RIGHT - tX); int tW = it.length() * 6;
+      display.setCursor(tX - (i == menuCursorIndex && tW > lim ? scrollX : 0), drawY);
+      for(int j=0; j<it.length(); j++) { uint8_t c = getLatin1((uint8_t)it[j]); if(c > 0) display.write(c); }
     }
   }
   display.display();
 }
 
 void executeMenuSelection() {
-  String selected = menuItems[menuCursorIndex];
+  String sel = menuItems[menuCursorIndex];
   if (currentState == MENU_MAIN) {
-    if (selected == "[<-- Back]") { currentPath = "/"; buildMainMenu(); }
-    else if (selected.startsWith("[+] ")) { 
-      String folderName = selected.substring(4); 
-      currentPath = "/" + folderName; 
-      buildMainMenu(); 
+    if (sel == "[<-- Back]") { currentPath = "/"; buildMainMenu(); }
+    else if (sel.startsWith("[+] ")) { currentPath = "/" + sel.substring(4); buildMainMenu(); }
+    else if (sel == "-> Settings") { currentState = MENU_SETTINGS; buildSettingsMenu(); }
+    else {
+      currentBook = (currentPath == "/") ? "/" + sel + ".txt" : "/" + currentPath.substring(1) + "~" + sel + ".txt";
+      prefs.putString("lastBook", currentBook); loadProgress(); currentState = READING; pageStartTime = millis(); renderPage();
     }
-    else if (selected == "-> Settings") { currentState = MENU_SETTINGS; buildSettingsMenu(); }
-    else { 
-      if (currentPath == "/") {
-        currentBook = "/" + selected + ".txt"; 
-      } else {
-        String targetAuthor = currentPath.substring(1);
-        currentBook = "/" + targetAuthor + "~" + selected + ".txt";
-      }
-      prefs.putString("lastBook", currentBook); loadProgress(); currentState = READING; pageStartTime = millis(); renderPage(); 
-    }
-  }
-  else if (currentState == MENU_PAUSE) {
-    if (selected == "Continue Reading") { currentState = READING; pageStartTime = millis(); renderPage(); }
+  } else if (currentState == MENU_PAUSE) {
+    if (sel == "Continue Reading") { currentState = READING; pageStartTime = millis(); renderPage(); }
     else { saveProgress(); currentBook = ""; prefs.putString("lastBook", "none"); currentState = MENU_MAIN; buildMainMenu(); }
-  }
-  else if (currentState == MENU_SETTINGS) {
-    if (selected == "Book Upload") startWiFiPortal();
-    else if (selected == "Display Setup") { currentState = MENU_DISPLAY; buildDisplayMenu(); }
-    else if (selected == "Progress Reset") { currentState = MENU_RESET_PROGRESS; buildResetMenu(); }
-    else if (selected == "Delete Book") { currentState = MENU_DELETE_SELECT; buildDeleteMenu(); }
-    else if (selected == "Power Off") goToSleep();
-    else if (selected == "< Back to Books") { currentState = MENU_MAIN; buildMainMenu(); }
-  }
-  else if (currentState == MENU_DISPLAY) {
-    if (selected.indexOf("Mode") != -1) { isDarkMode = !isDarkMode; prefs.putBool("dark", isDarkMode); applySettings(); buildDisplayMenu(); }
-    else if (selected.indexOf("Brightness") != -1) { currentBrightness++; if(currentBrightness > 4) currentBrightness = 1; prefs.putInt("bright", currentBrightness); applySettings(); buildDisplayMenu(); }
+  } else if (currentState == MENU_SETTINGS) {
+    if (sel == "Book Upload") startWiFiPortal();
+    else if (sel == "Display Setup") { currentState = MENU_DISPLAY; buildDisplayMenu(); }
+    else if (sel == "Progress Reset") { currentState = MENU_RESET_PROGRESS; buildResetMenu(); }
+    else if (sel == "Delete Book") { currentState = MENU_DELETE_SELECT; buildDeleteMenu(); }
+    else if (sel == "Power Off") goToSleep();
+    else if (sel == "< Back to Books") { currentState = MENU_MAIN; buildMainMenu(); }
+  } else if (currentState == MENU_DISPLAY) {
+    if (sel.indexOf("Mode") != -1) { isDarkMode = !isDarkMode; prefs.putBool("dark", isDarkMode); applySettings(); buildDisplayMenu(); }
+    else if (sel.indexOf("Brightness") != -1) { currentBrightness++; if(currentBrightness > 4) currentBrightness = 1; prefs.putInt("bright", currentBrightness); applySettings(); buildDisplayMenu(); }
     else { currentState = MENU_SETTINGS; buildSettingsMenu(); }
-  }
-  else if (currentState == MENU_RESET_PROGRESS) {
-    if (selected == "< Back" || selected == "No progress found") { currentState = MENU_SETTINGS; buildSettingsMenu(); }
-    else { 
-      String target = selected; 
-      target.replace(" - ", "~"); 
-      target += ".pos"; 
-      LittleFS.remove("/" + target); 
-      buildResetMenu(); 
-    }
-  }
-  else if (currentState == MENU_DELETE_SELECT) {
-    if (selected == "< Back" || selected == "Library empty") { currentState = MENU_SETTINGS; buildSettingsMenu(); }
-    else { 
-      bookToDelete = "/" + selected; 
-      bookToDelete.replace(" - ", "~");
-      if (!bookToDelete.endsWith(".txt")) bookToDelete += ".txt"; 
-      currentState = MENU_DELETE_CONFIRM; drawMenu(); 
-    }
+  } else if (currentState == MENU_RESET_PROGRESS) {
+    if (sel == "< Back" || sel == "No progress found") { currentState = MENU_SETTINGS; buildSettingsMenu(); }
+    else { String t = sel; t.replace(" - ", "~"); LittleFS.remove("/" + t + ".pos"); buildResetMenu(); }
+  } else if (currentState == MENU_DELETE_SELECT) {
+    if (sel == "< Back" || sel == "Library empty") { currentState = MENU_SETTINGS; buildSettingsMenu(); }
+    else { bookToDelete = "/" + sel; bookToDelete.replace(" - ", "~"); if (!bookToDelete.endsWith(".txt")) bookToDelete += ".txt"; currentState = MENU_DELETE_CONFIRM; drawMenu(); }
   }
 }
 
-// --- WiFi / Upload Portal ---
-
 void startWiFiPortal() {
-  currentState = WIFI_PORTAL; footerScrollX = 0;
-  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-  WiFi.softAP(apSSID);
-  
+  currentState = WIFI_PORTAL; footerScrollX = 0; WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0)); WiFi.softAP(apSSID);
   server.on("/", HTTP_GET, []() {
-    String h = INDEX_HTML_TOP;
-    File root = LittleFS.open("/"); 
-    File file = root.openNextFile();
-    String authors[MAX_FILES];
-    int numAuthors = 0;
-    
-    while(file) { 
-      if(!file.isDirectory()) { 
-        String fn = String(file.name()); 
-        if(fn.startsWith("/")) fn = fn.substring(1); 
-        int tildeIdx = fn.indexOf('~');
-        if (tildeIdx > 0) {
-          String author = fn.substring(0, tildeIdx);
-          bool exists = false;
-          for (int i = 0; i < numAuthors; i++) {
-            if (authors[i] == author) { exists = true; break; }
-          }
-          if (!exists && numAuthors < MAX_FILES) {
-            authors[numAuthors++] = author;
-            h += "<option value='" + author + "'>" + author + "</option>"; 
-          }
-        }
-      } 
-      file = root.openNextFile(); 
+    String h = INDEX_HTML_TOP; File root = LittleFS.open("/"); File file = root.openNextFile(); String auths[MAX_FILES]; int nA = 0;
+    while(file) {
+      String fn = String(file.name()); if(fn.startsWith("/")) fn = fn.substring(1);
+      int tidx = fn.indexOf('~');
+      if (tidx > 0) {
+        String a = fn.substring(0, tidx); bool ex = false; for (int i=0; i<nA; i++) if (auths[i] == a) {ex=true; break;}
+        if (!ex && nA < MAX_FILES) { auths[nA++] = a; h += "<option value='" + a + "'>" + a + "</option>"; }
+      }
+      file = root.openNextFile();
     }
-    
-    h += INDEX_HTML_BOTTOM;
-    server.send(200, "text/html", h);
+    h += INDEX_HTML_BOTTOM; server.send(200, "text/html", h);
   });
-  
   server.on("/upload", HTTP_POST, []() { server.send(200, "text/plain", "OK"); }, []() {
     HTTPUpload& u = server.upload();
     if (u.status == UPLOAD_FILE_START) {
-      String author = server.arg("author_pick"); if (author == "") author = server.arg("author_new"); author.trim();
-      String customTitle = server.arg("title"); customTitle.trim();
-      
-      String finalFileName = (customTitle == "") ? u.filename : customTitle;
-      if (finalFileName.endsWith(".txt")) finalFileName = finalFileName.substring(0, finalFileName.length() - 4);
-      
-      if (author != "") {
-        finalFileName = author + "~" + finalFileName + ".txt";
-      } else {
-        finalFileName = finalFileName + ".txt";
-      }
-      
-      uploadFile = LittleFS.open("/" + finalFileName, "w");
-    } else if (u.status == UPLOAD_FILE_WRITE && uploadFile) { uploadFile.write(u.buf, u.currentSize); }
-    else if (u.status == UPLOAD_FILE_END && uploadFile) { uploadFile.close(); }
+      String a = server.arg("author_pick"); if (a == "") a = server.arg("author_new"); a.trim();
+      String t = server.arg("title"); t.trim();
+      String fN = (t == "") ? u.filename : t; if (fN.endsWith(".txt")) fN = fN.substring(0, fN.length() - 4);
+      fN = (a != "") ? a + "~" + fN + ".txt" : fN + ".txt";
+      uploadFile = LittleFS.open("/" + fN, "w");
+    } else if (u.status == UPLOAD_FILE_WRITE && uploadFile) uploadFile.write(u.buf, u.currentSize);
+    else if (u.status == UPLOAD_FILE_END && uploadFile) uploadFile.close();
   });
-  
   server.begin();
 }
 
 void updateWiFiDisplay() {
-  display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
-  display.setCursor(M_LEFT, M_TOP);      display.println("--- Upload Portal ---");
-  display.drawLine(M_LEFT, M_TOP + 8, M_RIGHT, M_TOP + 8, WHITE);
-  
-  display.setCursor(M_LEFT, M_TOP + 18); display.print("SSID: "); display.println(apSSID);
-  display.setCursor(M_LEFT, M_TOP + 30); display.print("IP:   "); display.println(apIP.toString());
-  
-  display.drawLine(M_LEFT, M_BOTTOM - 12, M_RIGHT, M_BOTTOM - 12, WHITE);
-  String ticker = "Double-click to close portal";
-  int tickerWidth = ticker.length() * 6;
-  display.setCursor(M_LEFT - footerScrollX, M_BOTTOM - 8);
-  display.print(ticker);
-  display.setCursor(M_LEFT - footerScrollX + tickerWidth + MARQUEE_GAP, M_BOTTOM - 8);
-  display.print(ticker);
-  display.display();
+  display.clearDisplay(); display.setTextColor(WHITE); display.setCursor(M_LEFT, M_TOP); display.println("--- Upload Portal ---"); display.drawLine(M_LEFT, M_TOP+8, M_RIGHT, M_TOP+8, WHITE);
+  display.setCursor(M_LEFT, M_TOP+18); display.print("SSID: "); display.println(apSSID); display.setCursor(M_LEFT, M_TOP+30); display.print("IP:   "); display.println(apIP.toString());
+  display.drawLine(M_LEFT, M_BOTTOM-12, M_RIGHT, M_BOTTOM-12, WHITE);
+  String tk = "Double-click to close portal"; int tW = tk.length() * 6;
+  display.setCursor(M_LEFT - footerScrollX, M_BOTTOM-8); display.print(tk);
+  display.setCursor(M_LEFT - footerScrollX + tW + MARQUEE_GAP, M_BOTTOM-8); display.print(tk); display.display();
 }
 
 void stopWiFiPortal() { server.stop(); WiFi.softAPdisconnect(true); }
 
 void drawAnimatedSplash() {
-  String v = "v" + String(random(0, 10)) + "." + String(random(0, 99));
-  const char* suffixes[] = {"", "-beta", " [STABLE?]", " (Legacy)", ".rev6", "-rc1", " [Turbo]"};
-  v += suffixes[random(0, 7)];
+  String v = "v5.0 [FULLSCREEN]";
   for (int i = 0; i <= 100; i += 4) {
-    display.clearDisplay();
-    display.setTextColor(WHITE);
-    display.setTextSize(2); display.setCursor(22, 18); display.print("EsBook32");
-    display.drawRect(23, 45, 82, 8, WHITE);
-    display.fillRect(25, 47, map(i, 0, 100, 0, 78), 4, WHITE);
-    display.setTextSize(1); display.setCursor(64 - (v.length() * 3), 36); display.print(v);
-    display.display(); delay(45);
+    display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(2); display.setCursor(22, 18); display.print("EsBook32");
+    display.drawRect(23, 45, 82, 8, WHITE); display.fillRect(25, 47, map(i,0,100,0,78), 4, WHITE);
+    display.setTextSize(1); display.setCursor(64 - (v.length() * 3), 36); display.print(v); display.display(); delay(45);
   }
-  delay(500);
 }
 
 void applySettings() {
-  display.setRotation(0);
-  uint8_t contrast = (currentBrightness == 1) ? 32 : (currentBrightness == 2) ? 96 : (currentBrightness == 3) ? 160 : 255;
-  display.ssd1306_command(SSD1306_SETCONTRAST);
-  display.ssd1306_command(contrast);
-  if(isDarkMode) display.ssd1306_command(SSD1306_NORMALDISPLAY);
-  else display.ssd1306_command(SSD1306_INVERTDISPLAY);
+  display.setRotation(0); uint8_t c = (currentBrightness == 1) ? 32 : (currentBrightness == 2) ? 96 : (currentBrightness == 3) ? 160 : 255;
+  display.ssd1306_command(SSD1306_SETCONTRAST); display.ssd1306_command(c);
+  if(isDarkMode) display.ssd1306_command(SSD1306_NORMALDISPLAY); else display.ssd1306_command(SSD1306_INVERTDISPLAY);
 }
 
 void printStatusBar(bool showProgress) {
   display.setTextColor(WHITE); display.setTextSize(1);
   display.setCursor(M_LEFT, M_TOP); display.print("EsB32");
   if (showProgress && currentBookSize > 0) {
-    int percent = (pageStarts[currentPage] * 100) / currentBookSize;
-    display.setCursor(58, M_TOP); display.print(percent); display.print("%");
+    int percent = (pageStarts[currentPage] * 100) / currentBookSize; 
+    display.setCursor(58, M_TOP); display.print(percent); display.print("%"); 
   }
-  display.drawLine(M_LEFT, M_TOP + 8, M_RIGHT, M_TOP + 8, WHITE);
+  display.drawLine(M_LEFT, M_TOP+8, M_RIGHT, M_TOP+8, WHITE);
 }
 
-void loadProgress() {
-  String p = currentBook; p.replace(".txt", ".pos");
-  File f = LittleFS.open(p, "r");
-  pageStarts[0] = f ? f.readString().toInt() : 0;
-  currentPage = 0; if(f) f.close();
-}
-
-void saveProgress() {
-  if (currentBook == "" || currentBook == "none") return;
-  String p = currentBook; p.replace(".txt", ".pos");
-  File f = LittleFS.open(p, "w");
-  if(f) { f.print(pageStarts[currentPage]); f.close(); }
-}
+void loadProgress() { String p = currentBook; p.replace(".txt", ".pos"); File f = LittleFS.open(p, "r"); pageStarts[0] = f ? f.readString().toInt() : 0; currentPage = 0; if(f) f.close(); }
+void saveProgress() { if (currentBook == "" || currentBook == "none") return; String p = currentBook; p.replace(".txt", ".pos"); File f = LittleFS.open(p, "w"); if(f) { f.print(pageStarts[currentPage]); f.close(); } }
 
 void changePage(int direction) {
   if (direction == 1 && pageStarts[currentPage + 1] > pageStarts[currentPage]) currentPage++;
   else if (direction == -1 && currentPage > 0) currentPage--;
-  autoSaveCounter++;
-  if (autoSaveCounter >= 10) { saveProgress(); autoSaveCounter = 0; }
+  autoSaveCounter++; if (autoSaveCounter >= 10) { saveProgress(); autoSaveCounter = 0; }
   pageStartTime = millis(); renderPage();
 }
 
@@ -590,30 +455,74 @@ void renderPage() {
   currentBookSize = f.size();
   f.seek(pageStarts[currentPage]);
   display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
-  int x = M_LEFT, y = M_TOP;
+  
+  // REMOVED printStatusBar() to allow full text coverage
+  
+  int x = M_LEFT, y = M_TOP; // Set initial Y right to the top margin
   uint32_t lineStart = pageStarts[currentPage];
   pageStarts[currentPage+1] = 0;
   String word = "";
+  uint32_t wordStartPos = f.position();
+  
   while (f.available()) {
-    char c = f.read();
-    if (c != ' ' && c != '\n' && c != '\r') { word += c; }
+    uint32_t charPos = f.position();
+    uint8_t raw = f.read();
+    uint8_t c = getLatin1(raw);
+    
+    if (c == 0) continue; 
+    
+    if (c != ' ' && c != '\n' && c != '\r') { 
+      if (word.length() == 0) wordStartPos = charPos; 
+      word += (char)c; 
+    }
     else {
-      if (x + (word.length() * 6) > M_RIGHT) { x = M_LEFT; y += 8; if (y <= M_BOTTOM - 8) lineStart = f.position() - 1 - word.length(); }
-      if (y > M_BOTTOM - 8) break;
-      display.setCursor(x, y); display.print(word); x += (word.length() * 6);
-      if (c == ' ') { if (x + 6 <= M_RIGHT) { display.print(" "); x += 6; } else { x = M_LEFT; y += 8; if (y <= M_BOTTOM - 8) lineStart = f.position(); } }
-      else if (c == '\n') { x = M_LEFT; y += 8; if (y <= M_BOTTOM - 8) lineStart = f.position(); }
-      if (y > M_BOTTOM - 8) break;
-      word = "";
+      if (word.length() > 0) {
+        int wordWidth = word.length() * 6;
+        bool fitsOnLine = (x + wordWidth <= M_RIGHT);
+        
+        if (!fitsOnLine) {
+          x = M_LEFT;
+          y += 8;
+        }
+
+        if (y > M_BOTTOM - 8) {
+          lineStart = wordStartPos; 
+          break; 
+        }
+
+        display.setCursor(x, y);
+        display.print(word); 
+        x += wordWidth;
+        word = "";
+      }
+      
+      if (c == ' ') { 
+        if (x + 6 <= M_RIGHT) { 
+          display.write(' '); 
+          x += 6; 
+        } else { 
+          x = M_LEFT; y += 8; 
+        } 
+      }
+      else if (c == '\n') { x = M_LEFT; y += 8; }
+      
+      if (y > M_BOTTOM - 8) {
+        lineStart = f.position(); 
+        break;
+      }
     }
   }
+  
+  if (word.length() > 0 && y <= M_BOTTOM - 8) {
+    int wordWidth = word.length() * 6;
+    if (x + wordWidth > M_RIGHT) { x = M_LEFT; y += 8; }
+    if (y <= M_BOTTOM - 8) {
+      display.setCursor(x, y);
+      display.print(word);
+    }
+  }
+
   display.display(); f.close(); pageStarts[currentPage + 1] = lineStart;
 }
 
-void goToSleep() {
-  saveProgress();
-  display.clearDisplay(); display.setCursor(20, 30); display.println("Sleeping"); display.display(); delay(1000);
-  display.ssd1306_command(SSD1306_DISPLAYOFF);
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)BTN_1_PIN, 0);
-  esp_deep_sleep_start();
-}
+void goToSleep() { saveProgress(); display.clearDisplay(); display.setCursor(20, 30); display.println("Sleeping"); display.display(); delay(1000); display.ssd1306_command(SSD1306_DISPLAYOFF); esp_sleep_enable_ext0_wakeup((gpio_num_t)BTN_1_PIN, 0); esp_deep_sleep_start(); }
