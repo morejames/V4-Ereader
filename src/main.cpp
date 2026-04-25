@@ -55,6 +55,7 @@ bool scrollComplete = false;
 
 int currentBrightness = 4;
 bool isDarkMode = true;
+bool isFlipped = false; // Left-handed mode toggle
 unsigned long lastActivityTime = 0;
 const unsigned long SLEEP_TIMEOUT = 120000;
 
@@ -92,6 +93,7 @@ void stopWiFiPortal();
 void drawAnimatedSplash();
 void deleteBookAndCleanup(String fullPath);
 uint8_t getLatin1(uint8_t c);
+void sortMenu(int startIdx, int endIdx);
 
 void setup() {
   Serial.begin(115200);
@@ -113,6 +115,7 @@ void setup() {
   prefs.begin("esbook", false);
   currentBrightness = prefs.getInt("bright", 4);
   isDarkMode = prefs.getBool("dark", true);
+  isFlipped = prefs.getBool("flip", false);
   currentBook = prefs.getString("lastBook", "");
 
   applySettings();
@@ -225,10 +228,38 @@ void deleteBookAndCleanup(String fullPath) {
   if (LittleFS.exists(p)) LittleFS.remove(p);
 }
 
+// Alphabetical Bubble Sort (Keeps Folders at Top)
+void sortMenu(int startIdx, int endIdx) {
+  for (int i = startIdx; i < endIdx - 1; i++) {
+    for (int j = i + 1; j < endIdx; j++) {
+      String a = menuItems[i];
+      String b = menuItems[j];
+      bool aIsFolder = a.startsWith("[+] ");
+      bool bIsFolder = b.startsWith("[+] ");
+      bool doSwap = false;
+      
+      if (aIsFolder && !bIsFolder) doSwap = false;
+      else if (!aIsFolder && bIsFolder) doSwap = true;
+      else {
+        String cleanA = aIsFolder ? a.substring(4) : a;
+        String cleanB = bIsFolder ? b.substring(4) : b;
+        // Convert to lowercase to ensure 'a' and 'A' sort together properly
+        cleanA.toLowerCase(); cleanB.toLowerCase();
+        if (cleanA.compareTo(cleanB) > 0) doSwap = true;
+      }
+      
+      if (doSwap) { menuItems[i] = b; menuItems[j] = a; }
+    }
+  }
+}
+
 void buildMainMenu() {
   numMenuItems = 0; menuCursorIndex = 0; scrollX = 0; scrollComplete = false; scrollDelayStart = millis();
   File root = LittleFS.open("/");
   File file = root.openNextFile();
+  
+  int sortStart = 0;
+  
   if (currentPath == "/") {
     while(file && numMenuItems < MAX_FILES - 2) {
       String fn = String(file.name()); if (fn.startsWith("/")) fn = fn.substring(1);
@@ -242,15 +273,18 @@ void buildMainMenu() {
       }
       file = root.openNextFile();
     }
+    sortMenu(sortStart, numMenuItems);
     menuItems[numMenuItems++] = "-> Settings";
   } else {
     menuItems[numMenuItems++] = "[<-- Back]";
+    sortStart = 1; // Don't sort the back button
     String auth = currentPath.substring(1);
     while(file && numMenuItems < MAX_FILES) {
       String fn = String(file.name()); if (fn.startsWith("/")) fn = fn.substring(1);
       if (fn.endsWith(".txt") && fn.startsWith(auth + "~")) menuItems[numMenuItems++] = fn.substring(auth.length() + 1, fn.length() - 4);
       file = root.openNextFile();
     }
+    sortMenu(sortStart, numMenuItems);
   }
   drawMenu();
 }
@@ -267,6 +301,7 @@ void buildDisplayMenu() {
   numMenuItems = 0; menuCursorIndex = 0;
   menuItems[numMenuItems++] = "Brightness: " + String(currentBrightness);
   menuItems[numMenuItems++] = isDarkMode ? "Mode: DARK" : "Mode: LIGHT";
+  menuItems[numMenuItems++] = isFlipped ? "Orient: FLIPPED" : "Orient: NORMAL";
   menuItems[numMenuItems++] = "< Back";
   drawMenu();
 }
@@ -364,6 +399,7 @@ void executeMenuSelection() {
     else if (sel == "< Back to Books") { currentState = MENU_MAIN; buildMainMenu(); }
   } else if (currentState == MENU_DISPLAY) {
     if (sel.indexOf("Mode") != -1) { isDarkMode = !isDarkMode; prefs.putBool("dark", isDarkMode); applySettings(); buildDisplayMenu(); }
+    else if (sel.indexOf("Orient") != -1) { isFlipped = !isFlipped; prefs.putBool("flip", isFlipped); applySettings(); buildDisplayMenu(); }
     else if (sel.indexOf("Brightness") != -1) { currentBrightness++; if(currentBrightness > 4) currentBrightness = 1; prefs.putInt("bright", currentBrightness); applySettings(); buildDisplayMenu(); }
     else { currentState = MENU_SETTINGS; buildSettingsMenu(); }
   } else if (currentState == MENU_RESET_PROGRESS) {
@@ -416,7 +452,7 @@ void updateWiFiDisplay() {
 void stopWiFiPortal() { server.stop(); WiFi.softAPdisconnect(true); }
 
 void drawAnimatedSplash() {
-  String v = "v5.0 [FULLSCREEN]";
+  String v = "v5.1";
   for (int i = 0; i <= 100; i += 4) {
     display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(2); display.setCursor(22, 18); display.print("EsBook32");
     display.drawRect(23, 45, 82, 8, WHITE); display.fillRect(25, 47, map(i,0,100,0,78), 4, WHITE);
@@ -425,7 +461,8 @@ void drawAnimatedSplash() {
 }
 
 void applySettings() {
-  display.setRotation(0); uint8_t c = (currentBrightness == 1) ? 32 : (currentBrightness == 2) ? 96 : (currentBrightness == 3) ? 160 : 255;
+  display.setRotation(isFlipped ? 2 : 0); 
+  uint8_t c = (currentBrightness == 1) ? 32 : (currentBrightness == 2) ? 96 : (currentBrightness == 3) ? 160 : 255;
   display.ssd1306_command(SSD1306_SETCONTRAST); display.ssd1306_command(c);
   if(isDarkMode) display.ssd1306_command(SSD1306_NORMALDISPLAY); else display.ssd1306_command(SSD1306_INVERTDISPLAY);
 }
@@ -444,8 +481,28 @@ void loadProgress() { String p = currentBook; p.replace(".txt", ".pos"); File f 
 void saveProgress() { if (currentBook == "" || currentBook == "none") return; String p = currentBook; p.replace(".txt", ".pos"); File f = LittleFS.open(p, "w"); if(f) { f.print(pageStarts[currentPage]); f.close(); } }
 
 void changePage(int direction) {
-  if (direction == 1 && pageStarts[currentPage + 1] > pageStarts[currentPage]) currentPage++;
+  if (direction == 1) {
+    if (pageStarts[currentPage + 1] >= currentBookSize) {
+      // Auto-Cleanup on Book Finish
+      display.clearDisplay();
+      display.setCursor(20, 25);
+      display.println("Book Finished!");
+      display.display();
+      delay(2000);
+      
+      String p = currentBook; p.replace(".txt", ".pos");
+      LittleFS.remove(p); // Delete progress to reset to beginning
+      currentBook = "";
+      prefs.putString("lastBook", "none");
+      currentState = MENU_MAIN;
+      buildMainMenu();
+      return;
+    } else if (pageStarts[currentPage + 1] > pageStarts[currentPage]) {
+      currentPage++;
+    }
+  }
   else if (direction == -1 && currentPage > 0) currentPage--;
+  
   autoSaveCounter++; if (autoSaveCounter >= 10) { saveProgress(); autoSaveCounter = 0; }
   pageStartTime = millis(); renderPage();
 }
@@ -456,9 +513,7 @@ void renderPage() {
   f.seek(pageStarts[currentPage]);
   display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
   
-  // REMOVED printStatusBar() to allow full text coverage
-  
-  int x = M_LEFT, y = M_TOP; // Set initial Y right to the top margin
+  int x = M_LEFT, y = M_TOP; 
   uint32_t lineStart = pageStarts[currentPage];
   pageStarts[currentPage+1] = 0;
   String word = "";
